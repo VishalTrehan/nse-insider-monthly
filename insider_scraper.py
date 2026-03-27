@@ -178,5 +178,5 @@ def main(target_year=None, target_month=None, output_prefix="output"):
     print(sell_path)
 
 if __name__ == "__main__":
-    # Default behaviour: previous month (good for running on 2nd of each month).
-    main()
+    # Explicitly request March 2026 (change year/month as needed)
+    main(target_year=2026, target_month=3)
