@@ -44,7 +44,6 @@ jobs:
         env:
           SUBSCRIBERS_SHEET_ID: ${{ secrets.SUBSCRIBERS_SHEET_ID }}
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
-          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
         run: |
           python newsletter_sender.py
