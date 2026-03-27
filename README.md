@@ -35,3 +35,44 @@ Future steps (planned):
    ```
 
 The generated CSV files will appear in the current directory.
+
+## Subscriber System Configuration
+
+The bot automatically reads subscriber email addresses from a Google Sheet and sends newsletters.
+
+### Required Secrets (GitHub Actions)
+
+Add these to `Settings > Secrets and variables > Actions`:
+
+- **SUBSCRIBERS_SHEET_ID**: `1vYZfGm16g-rB8msPuLm2iluQCB3-CXsWEmciNtop2WQ`
+  - Stores subscriber email addresses and signup source
+  - Connected to subscription form at: https://docs.google.com/forms/d/1BtlBVG0ULykK1swjHwOQVDHmUD26yG_K3HqCoG41GBQ/
+  - Responses sheet: NSE Insider Trades - Subscribe for Full Reports (Responses)
+
+- **GMAIL_APP_PASSWORD**: Your Gmail app-specific password (for sending newsletters)
+
+### Subscriber Form
+
+- **Form**: NSE Insider Trades - Subscribe for Full Reports
+- **URL**: https://docs.google.com/forms/d/1BtlBVG0ULykK1swjHwOQVDHmUD26yG_K3HqCoG41GBQ/
+- **Responses Sheet ID**: 1vYZfGm16g-rB8msPuLm2iluQCB3-CXsWEmciNtop2WQ
+- **Columns**:
+  - Timestamp: Auto-populated by form
+  - Your Email Address: Required field for newsletter signup
+  - How did you hear about us?: Tracks signup source (Twitter/X, LinkedIn, Email Newsletter, Other)
+  - Name: Optional field for personalization
+
+### Monthly Newsletter Workflow
+
+1. **Data Collection**: Form automatically collects subscriber emails when someone signs up
+2. **Email Extraction**: Bot reads SUBSCRIBERS_SHEET_ID to extract all subscriber emails
+3. **Report Generation**: Python script generates insider trading report
+4. **Newsletter Distribution**: Bot sends personalized emails with PDF report attached
+5. **Analytics**: Track which channel (Twitter/X, LinkedIn, Email) drives most signups
+
+### Templates
+
+Email and social media templates available in: NSE Insider Trades - Email & Social Templates
+- Email template for full report distribution
+- Twitter/X teaser template
+- LinkedIn teaser template
