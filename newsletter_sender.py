@@ -3,16 +3,16 @@
 NSE Insider Trades - Newsletter Sender Bot
 Automatically sends monthly insider trading reports to subscribers
 """
-
 import os
 import sys
+import json
+import base64
 import gspread
 from google.auth.transport.requests import Request
 from google.oauth2.service_account import Credentials
+from google.auth import default
+from googleapiclient.discovery import build
 from datetime import datetime
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 import logging
 
 # Configure logging
@@ -36,7 +36,6 @@ class SubscriberManager:
         """Authenticate with Google Sheets API"""
         try:
             # Parse credentials from environment variable (GitHub Actions)
-            import json
             creds_dict = json.loads(self.credentials_json)
             creds = Credentials.from_service_account_info(
                 creds_dict,
@@ -48,20 +47,20 @@ class SubscriberManager:
         except Exception as e:
             logger.error(f"✗ Failed to authenticate: {str(e)}")
             return False
-    
+        
     def load_subscribers(self):
         """Load subscriber emails from Google Sheet"""
         try:
             self.sheet = self.gc.open_by_key(self.sheet_id)
-            worksheet = self.sheet.get_worksheet(0)  # First sheet
+            worksheet = self.sheet.get_worksheet(0) # First sheet
             
             # Get all data
             data = worksheet.get_all_values()
             
             subscribers = []
-            if len(data) > 1:  # Skip header
+            if len(data) > 1: # Skip header
                 for row in data[1:]:
-                    if len(row) >= 2 and row[1]:  # Email in column B
+                    if len(row) >= 2 and row[1]: # Email in column B
                         subscribers.append({
                             'email': row[1].strip(),
                             'source': row[2] if len(row) > 2 else 'Unknown',
@@ -75,25 +74,39 @@ class SubscriberManager:
             return []
 
 class NewsletterSender:
-    """Sends newsletter emails to subscribers"""
+    """Sends newsletter emails using Gmail API"""
     
-    def __init__(self, gmail_address, app_password):
+    def __init__(self, gmail_address, credentials_json):
         """Initialize with Gmail credentials"""
         self.gmail_address = gmail_address
-        self.app_password = app_password
+        self.credentials_json = credentials_json
         self.sent_count = 0
         self.failed_count = 0
+        self.service = None
+        self._init_gmail_service()
+        
+    def _init_gmail_service(self):
+        """Initialize Gmail API service"""
+        try:
+            creds_dict = json.loads(self.credentials_json)
+            creds = Credentials.from_service_account_info(
+                creds_dict,
+                scopes=['https://www.googleapis.com/auth/gmail.send']
+            )
+            self.service = build('gmail', 'v1', credentials=creds)
+            logger.info("✓ Gmail API service initialized")
+        except Exception as e:
+            logger.error(f"✗ Failed to init Gmail service: {str(e)}")
     
     def send_newsletter(self, subscriber_email, subscriber_name, report_content):
-        """Send newsletter to individual subscriber"""
+        """Send newsletter to individual subscriber via Gmail API"""
         try:
-            # Create message
-            msg = MIMEMultipart('alternative')
-            msg['From'] = self.gmail_address
-            msg['To'] = subscriber_email
-            msg['Subject'] = f"NSE Insider Trades Report - {datetime.now().strftime('%B %Y')}"
-            
-            # Email body
+            if not self.service:
+                logger.error(f"✗ Gmail service not initialized")
+                self.failed_count += 1
+                return False
+                
+            # Create email message
             email_body = f"""Hello {subscriber_name},
 
 Thank you for subscribing to NSE Insider Trading Analysis!
@@ -111,14 +124,21 @@ Best Regards,
 NSE Insider Trades Team
             """
             
-            part = MIMEText(email_body, 'plain')
-            msg.attach(part)
+            # Create message in RFC 2822 format
+            message = f"""From: {self.gmail_address}
+To: {subscriber_email}
+Subject: NSE Insider Trades Report - {datetime.now().strftime('%B %Y')}
+
+{email_body}"""
             
-            # Send email
-            server = smtplib.SMTP_SSL('smtp.gmail.com', 465)
-            server.login(self.gmail_address, self.app_password)
-            server.send_message(msg)
-            server.quit()
+            # Encode message
+            raw_message = base64.urlsafe_b64encode(message.encode()).decode()
+            
+            # Send message
+            self.service.users().messages().send(
+                userId='me',
+                body={'raw': raw_message}
+            ).execute()
             
             self.sent_count += 1
             logger.info(f"✓ Email sent to {subscriber_email}")
@@ -127,7 +147,7 @@ NSE Insider Trades Team
             self.failed_count += 1
             logger.error(f"✗ Failed to send email to {subscriber_email}: {str(e)}")
             return False
-    
+        
     def send_batch(self, subscribers, report_content):
         """Send newsletter to all subscribers"""
         logger.info(f"\n📧 Sending newsletters to {len(subscribers)} subscribers...\n")
@@ -140,8 +160,8 @@ NSE Insider Trades Team
             )
         
         logger.info(f"\n✓ Newsletter campaign complete!")
-        logger.info(f"  - Sent: {self.sent_count}")
-        logger.info(f"  - Failed: {self.failed_count}\n")
+        logger.info(f" - Sent: {self.sent_count}")
+        logger.info(f" - Failed: {self.failed_count}\n")
 
 def get_report_content():
     """Generate report content from CSV files"""
@@ -180,18 +200,15 @@ def main():
     # Get credentials from environment
     subscribers_sheet_id = os.getenv('SUBSCRIBERS_SHEET_ID')
     gmail_user = os.getenv('GMAIL_USER', 'ra.vishal.trehan@gmail.com')
-    gmail_app_password = os.getenv('GMAIL_APP_PASSWORD')
     google_credentials_json = os.getenv('GOOGLE_CREDENTIALS_JSON')
     
     # Validate inputs
-    if not all([subscribers_sheet_id, gmail_app_password, google_credentials_json]):
+    if not all([subscribers_sheet_id, google_credentials_json]):
         logger.error("✗ Missing required environment variables:")
         if not subscribers_sheet_id:
-            logger.error("  - SUBSCRIBERS_SHEET_ID")
-        if not gmail_app_password:
-            logger.error("  - GMAIL_APP_PASSWORD")
+            logger.error(" - SUBSCRIBERS_SHEET_ID")
         if not google_credentials_json:
-            logger.error("  - GOOGLE_CREDENTIALS_JSON")
+            logger.error(" - GOOGLE_CREDENTIALS_JSON")
         sys.exit(1)
     
     logger.info("✓ Environment variables loaded\n")
@@ -212,8 +229,8 @@ def main():
     logger.info("\n📊 Generating insider trading report...")
     report_content = get_report_content()
     
-    # Send newsletters
-    sender = NewsletterSender(gmail_user, gmail_app_password)
+    # Send newsletters using Gmail API
+    sender = NewsletterSender(gmail_user, google_credentials_json)
     sender.send_batch(subscribers, report_content)
     
     logger.info("\n" + "="*60)
