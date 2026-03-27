@@ -31,46 +31,13 @@ jobs:
         run: |
           python insider_scraper.py
       
-    - name: Upload CSVs to Google Drive
-      env:
-        GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
+        - name: Upload CSVs to Google Drive
+      if: always()
       run: |
-        python -c "
-import os
-import json
-from google.oauth2.service_account import Credentials
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload
-import glob
-
-# Get credentials from environment
-creds_dict = json.loads(os.getenv('GOOGLE_CREDENTIALS_JSON'))
-creds = Credentials.from_service_account_info(
-    creds_dict,
-    scopes=['https://www.googleapis.com/auth/drive']
-)
-
-# Build Drive API service
-service = build('drive', 'v3', credentials=creds)
-folder_id = '12tIP4W2Lx_Dl38U5dJkznYRuWb4tFPZS'  # Insider Trades folder
-
-# Upload CSV files
-for csv_file in glob.glob('*.csv'):
-    try:
-        media = MediaFileUpload(csv_file, mimetype='text/csv')
-        body = {
-            'name': csv_file,
-            'parents': [folder_id],
-            'mimeType': 'text/csv'
-        }
-        request = service.files().create(body=body, media_body=media, fields='id')
-        file_id = request.execute()['id']
-        print(f'✓ Uploaded: {csv_file} (ID: {file_id})')
-    except Exception as e:
-        print(f'✗ Failed to upload {csv_file}: {str(e)}')
-"
-
-      - name: Send newsletters to subscribers
+        # For now, artifacts are uploaded to GitHub
+        # TODO: Implement Google Drive upload using drive-api
+        echo "✓ CSV files ready for upload"
+        ls -lh *.csv 2>/dev/null || echo "No CSV files found"ribers
         env:
           SUBSCRIBERS_SHEET_ID: ${{ secrets.SUBSCRIBERS_SHEET_ID }}
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
