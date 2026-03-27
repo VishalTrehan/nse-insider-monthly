@@ -2,3 +2,10 @@ requests
 pandas
 python-dateutil
 numpy
+gspread
+google-auth
+google-auth-oauthlib
+google-auth-httplib2
+smtplib
+email
+logging
