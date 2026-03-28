@@ -25,13 +25,41 @@ data = response.json()["data"]
 df = pd.DataFrame(data)
 
 # -------------------------------
-# STEP 2: Basic Cleaning
+# STEP 2: Flexible Column Mapping
 # -------------------------------
-df = df[['symbol', 'acqName', 'personCategory', 'modeOfAcquisition',
-         'secVal', 'secAcq', 'date']]
 
-df.columns = ['symbol', 'acqName', 'person', 'mode',
-              'secVal', 'stake_change', 'date']
+# Normalize column names
+df.columns = [col.strip() for col in df.columns]
+
+# Column mapping (handles NSE inconsistencies)
+column_map = {
+    'symbol': 'symbol',
+    'acqName': 'acqName',
+    'personCategory': 'person',
+    'personCat': 'person',
+    'category': 'person',
+    'modeOfAcquisition': 'mode',
+    'acqMode': 'mode',
+    'mode': 'mode',
+    'secVal': 'secVal',
+    'secAcq': 'stake_change',
+    'secValChange': 'stake_change',
+    'changeInShareholding': 'stake_change',
+    'date': 'date',
+    'acqfromDt': 'date'
+}
+
+# Rename dynamically
+df = df.rename(columns={col: column_map[col] for col in df.columns if col in column_map})
+
+# Keep only required columns if present
+required_cols = ['symbol', 'acqName', 'person', 'mode', 'secVal', 'stake_change', 'date']
+df = df[[col for col in required_cols if col in df.columns]]
+
+# Ensure missing columns are created
+for col in required_cols:
+    if col not in df.columns:
+        df[col] = np.nan
 
 df['date'] = pd.to_datetime(df['date'], errors='coerce')
 
