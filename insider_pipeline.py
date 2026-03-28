@@ -8,7 +8,7 @@ import smtplib
 from email.mime.text import MIMEText
 
 # -------------------------------
-# STEP 1: Fetch NSE Insider Data
+# STEP 1: Fetch NSE Data
 # -------------------------------
 url = "https://www.nseindia.com/api/corporates-pit"
 
@@ -20,51 +20,72 @@ session = requests.Session()
 session.get("https://www.nseindia.com", headers=headers)
 
 response = session.get(url, headers=headers)
-data = response.json()["data"]
+data = response.json().get("data", [])
 
 df = pd.DataFrame(data)
 
+if df.empty:
+    raise ValueError("No data fetched from NSE")
+
 # -------------------------------
-# STEP 2: Flexible Column Mapping
+# STEP 2: CLEAN + STANDARDIZE
 # -------------------------------
 
 # Normalize column names
 df.columns = [col.strip() for col in df.columns]
 
-# Column mapping (handles NSE inconsistencies)
+# Flexible mapping (based on ALL your earlier failures)
 column_map = {
     'symbol': 'symbol',
     'acqName': 'acqName',
     'personCategory': 'person',
     'personCat': 'person',
     'category': 'person',
+
     'modeOfAcquisition': 'mode',
     'acqMode': 'mode',
     'mode': 'mode',
+
     'secVal': 'secVal',
+
     'secAcq': 'stake_change',
-    'secValChange': 'stake_change',
     'changeInShareholding': 'stake_change',
+    'secValChange': 'stake_change',
+
     'date': 'date',
-    'acqfromDt': 'date'
+    'acqfromDt': 'date',
+    'acqtoDt': 'date'
 }
 
-# Rename dynamically
+# Apply mapping
 df = df.rename(columns={col: column_map[col] for col in df.columns if col in column_map})
 
-# Keep only required columns if present
-required_cols = ['symbol', 'acqName', 'person', 'mode', 'secVal', 'stake_change', 'date']
-df = df[[col for col in required_cols if col in df.columns]]
+# Remove duplicate columns (VERY IMPORTANT)
+df = df.loc[:, ~df.columns.duplicated()]
 
-# Ensure missing columns are created
+# Ensure required columns exist
+required_cols = ['symbol', 'person', 'mode', 'secVal', 'stake_change', 'date']
+
 for col in required_cols:
     if col not in df.columns:
         df[col] = np.nan
 
-df['date'] = pd.to_datetime(df['date'], errors='coerce')
+df = df[required_cols]
 
 # -------------------------------
-# STEP 3: Filter LAST MONTH DATA
+# STEP 3: TYPE CLEANING
+# -------------------------------
+df['secVal'] = pd.to_numeric(df['secVal'], errors='coerce')
+df['stake_change'] = pd.to_numeric(df['stake_change'], errors='coerce')
+
+# Safe date parsing
+df['date'] = pd.to_datetime(df['date'], errors='coerce', dayfirst=True)
+
+# Drop junk rows
+df = df.dropna(subset=['symbol', 'secVal'])
+
+# -------------------------------
+# STEP 4: LAST MONTH FILTER
 # -------------------------------
 today = datetime.today()
 first_day_this_month = today.replace(day=1)
@@ -73,14 +94,18 @@ last_month_start = last_month_end.replace(day=1)
 
 df = df[(df['date'] >= last_month_start) & (df['date'] <= last_month_end)]
 
+# Fallback (VERY IMPORTANT — NSE delay issue)
+if df.empty:
+    df = df.sort_values('date', ascending=False).head(1000)
+
 # -------------------------------
-# STEP 4: Promoter Filter
+# STEP 5: PROMOTER FILTER
 # -------------------------------
 df['is_promoter'] = df['person'].str.contains("PROMOTER", case=False, na=False)
 df = df[df['is_promoter']]
 
 # -------------------------------
-# STEP 5: Aggregate
+# STEP 6: AGGREGATION
 # -------------------------------
 summary = df.groupby('symbol').agg({
     'secVal': 'sum',
@@ -88,13 +113,18 @@ summary = df.groupby('symbol').agg({
     'symbol': 'count'
 }).rename(columns={'symbol': 'txn_count'}).reset_index()
 
+if summary.empty:
+    raise ValueError("No promoter transactions found")
+
 # -------------------------------
-# STEP 6: Scoring System
+# STEP 7: SCORING (your working logic)
 # -------------------------------
 summary['score_value'] = summary['secVal'] / summary['secVal'].max()
 summary['score_txn'] = summary['txn_count'] / summary['txn_count'].max()
-summary['score_stake'] = (summary['stake_change'] - summary['stake_change'].min()) / (
-    summary['stake_change'].max() - summary['stake_change'].min() + 1e-9
+
+summary['score_stake'] = (
+    (summary['stake_change'] - summary['stake_change'].min()) /
+    (summary['stake_change'].max() - summary['stake_change'].min() + 1e-9)
 )
 
 summary['final_score'] = (
@@ -108,7 +138,7 @@ summary = summary.sort_values('final_score', ascending=False)
 top_stocks = summary.head(10)
 
 # -------------------------------
-# STEP 7: AI Analysis
+# STEP 8: AI ANALYSIS
 # -------------------------------
 client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 
@@ -134,7 +164,7 @@ response = client.chat.completions.create(
 analysis = response.choices[0].message.content
 
 # -------------------------------
-# STEP 8: Email Output
+# STEP 9: EMAIL
 # -------------------------------
 sender = os.environ["EMAIL"]
 password = os.environ["GMAIL_APP_PASSWORD"]
