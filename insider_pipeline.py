@@ -5,88 +5,56 @@ import os
 from datetime import datetime, timedelta
 from openai import OpenAI
 import smtplib
+from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
 # -------------------------------
-# STEP 1: Fetch NSE Data
+# 1. FETCH DATA FROM NSE
 # -------------------------------
+
 url = "https://www.nseindia.com/api/corporates-pit"
+headers = {"User-Agent": "Mozilla/5.0"}
 
-headers = {
-    "User-Agent": "Mozilla/5.0"
-}
-
-session = requests.Session()
-session.get("https://www.nseindia.com", headers=headers)
-
-response = session.get(url, headers=headers)
-data = response.json().get("data", [])
-
-df = pd.DataFrame(data)
-
-if df.empty:
-    raise ValueError("No data fetched from NSE")
+response = requests.get(url, headers=headers)
+data = response.json()
+df = pd.json_normalize(data['data'])
 
 # -------------------------------
-# STEP 2: CLEAN + STANDARDIZE
+# 2. STANDARDIZE COLUMNS (ROBUST)
 # -------------------------------
 
-# Normalize column names
-df.columns = [col.strip() for col in df.columns]
+df.columns = df.columns.str.strip()
 
-# Flexible mapping (based on ALL your earlier failures)
 column_map = {
     'symbol': 'symbol',
-    'acqName': 'acqName',
-    'personCategory': 'person',
-    'personCat': 'person',
-    'category': 'person',
-
-    'modeOfAcquisition': 'mode',
-    'acqMode': 'mode',
-    'mode': 'mode',
-
+    'acqName': 'person',
     'secVal': 'secVal',
-
     'secAcq': 'stake_change',
-    'changeInShareholding': 'stake_change',
-    'secValChange': 'stake_change',
-
-    'date': 'date',
-    'acqfromDt': 'date',
-    'acqtoDt': 'date'
+    'stake_change': 'stake_change',
+    'modeOfAcquisition': 'mode',
+    'mode': 'mode',
+    'acqType': 'txn_type',
+    'txn_type': 'txn_type',
+    'dt': 'date',
+    'date': 'date'
 }
 
-# Apply mapping
-df = df.rename(columns={col: column_map[col] for col in df.columns if col in column_map})
+df = df.rename(columns={k: v for k, v in column_map.items() if k in df.columns})
 
-# Remove duplicate columns (VERY IMPORTANT)
-df = df.loc[:, ~df.columns.duplicated()]
+required_cols = ['symbol', 'person', 'secVal', 'stake_change', 'date']
+df = df[[c for c in required_cols if c in df.columns]]
 
-# Ensure required columns exist
-required_cols = ['symbol', 'person', 'mode', 'secVal', 'stake_change', 'date']
-
-for col in required_cols:
-    if col not in df.columns:
-        df[col] = np.nan
-
-df = df[required_cols]
+# Fill missing columns safely
+if 'stake_change' not in df.columns:
+    df['stake_change'] = 0
 
 # -------------------------------
-# STEP 3: TYPE CLEANING
+# 3. DATE FILTER (LAST MONTH)
 # -------------------------------
-df['secVal'] = pd.to_numeric(df['secVal'], errors='coerce')
-df['stake_change'] = pd.to_numeric(df['stake_change'], errors='coerce')
 
-# Safe date parsing
-df['date'] = pd.to_datetime(df['date'], errors='coerce', dayfirst=True)
+df['date'] = pd.to_datetime(df['date'], errors='coerce')
+df = df.dropna(subset=['date'])
 
-# Drop junk rows
-df = df.dropna(subset=['symbol', 'secVal'])
-
-# -------------------------------
-# STEP 4: LAST MONTH FILTER
-# -------------------------------
 today = datetime.today()
 first_day_this_month = today.replace(day=1)
 last_month_end = first_day_this_month - timedelta(days=1)
@@ -94,89 +62,134 @@ last_month_start = last_month_end.replace(day=1)
 
 df = df[(df['date'] >= last_month_start) & (df['date'] <= last_month_end)]
 
-# Fallback (VERY IMPORTANT — NSE delay issue)
-if df.empty:
-    df = df.sort_values('date', ascending=False).head(1000)
+# -------------------------------
+# 4. PROMOTER IDENTIFICATION (SAFE)
+# -------------------------------
+
+df['person'] = df['person'].astype(str)
+
+df['is_promoter'] = df['person'].str.contains(
+    'promoter', case=False, na=False
+).astype(int)
 
 # -------------------------------
-# STEP 5: PROMOTER FILTER
+# 5. AGGREGATION
 # -------------------------------
-df['is_promoter'] = df['person'].str.contains("PROMOTER", case=False, na=False)
-df = df[df['is_promoter']]
 
-# -------------------------------
-# STEP 6: AGGREGATION
-# -------------------------------
-summary = df.groupby('symbol').agg({
+agg = df.groupby('symbol').agg({
     'secVal': 'sum',
     'stake_change': 'sum',
-    'symbol': 'count'
-}).rename(columns={'symbol': 'txn_count'}).reset_index()
-
-if summary.empty:
-    raise ValueError("No promoter transactions found")
+    'symbol': 'count',
+    'is_promoter': 'sum'
+}).rename(columns={
+    'symbol': 'txn_count',
+    'is_promoter': 'promoter_txn'
+}).reset_index()
 
 # -------------------------------
-# STEP 7: SCORING (your working logic)
+# 6. SCORING SYSTEM
 # -------------------------------
-summary['score_value'] = summary['secVal'] / summary['secVal'].max()
-summary['score_txn'] = summary['txn_count'] / summary['txn_count'].max()
 
-summary['score_stake'] = (
-    (summary['stake_change'] - summary['stake_change'].min()) /
-    (summary['stake_change'].max() - summary['stake_change'].min() + 1e-9)
+def normalize(series):
+    return (series - series.min()) / (series.max() - series.min() + 1e-9)
+
+agg['score_value'] = normalize(agg['secVal'])
+agg['score_txn'] = normalize(agg['txn_count'])
+agg['score_stake'] = normalize(agg['stake_change'])
+agg['score_promoter'] = (agg['promoter_txn'] > 0).astype(int)
+
+agg['final_score'] = (
+    0.4 * agg['score_value'] +
+    0.2 * agg['score_txn'] +
+    0.2 * agg['score_stake'] +
+    0.2 * agg['score_promoter']
 )
 
-summary['final_score'] = (
-    0.4 * summary['score_value'] +
-    0.3 * summary['score_txn'] +
-    0.3 * summary['score_stake']
-)
-
-summary = summary.sort_values('final_score', ascending=False)
-
-top_stocks = summary.head(10)
+top = agg.sort_values('final_score', ascending=False).head(10)
 
 # -------------------------------
-# STEP 8: AI ANALYSIS
+# 7. AI ANALYSIS
 # -------------------------------
-client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+
+client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
 prompt = f"""
-You are a stock market analyst.
+You are a professional equity research analyst.
 
-Here is insider trading summary:
+Analyze this insider trading dataset and provide:
 
-{top_stocks.to_string(index=False)}
+1. Key bullish signals
+2. Any red flags
+3. Top 3 stock ideas with reasoning
+4. Final takeaway for investors
 
-Give:
-1. Bullish signals
-2. Red flags
-3. Top 3 stocks
-4. Final insight
+Keep it crisp and structured.
+
+DATA:
+{top.to_string(index=False)}
 """
 
 response = client.chat.completions.create(
-    model="gpt-4o-mini",
+    model="gpt-5.3",
     messages=[{"role": "user", "content": prompt}]
 )
 
 analysis = response.choices[0].message.content
 
 # -------------------------------
-# STEP 9: EMAIL
+# 8. FORMAT HTML EMAIL
 # -------------------------------
-sender = os.environ["EMAIL"]
-password = os.environ["GMAIL_APP_PASSWORD"]
 
-msg = MIMEText(analysis)
-msg['Subject'] = "Monthly NSE Insider Report"
-msg['From'] = sender
-msg['To'] = sender
+def highlight_top(df):
+    df = df.copy()
+    df['Rank'] = range(1, len(df) + 1)
+    return df[['Rank','symbol','secVal','stake_change','txn_count','promoter_txn','final_score']]
 
-server = smtplib.SMTP_SSL("smtp.gmail.com", 465)
+styled_df = highlight_top(top)
+
+html_table = styled_df.to_html(index=False, float_format="{:,.2f}".format)
+
+html_content = f"""
+<html>
+<body style="font-family: Arial;">
+
+<h2>📊 NSE Insider Trading Report (Monthly)</h2>
+
+<p><b>Period:</b> {last_month_start.date()} to {last_month_end.date()}</p>
+
+<h3>🏆 Top Insider Signals</h3>
+{html_table}
+
+<h3>🧠 AI Insights</h3>
+<div style="white-space: pre-wrap; font-size:14px;">
+{analysis}
+</div>
+
+<hr>
+<p style="color:gray;">Generated automatically via GitHub Actions</p>
+
+</body>
+</html>
+"""
+
+# -------------------------------
+# 9. SEND EMAIL
+# -------------------------------
+
+sender = os.environ.get("EMAIL")
+password = os.environ.get("GMAIL_APP_PASSWORD")
+
+msg = MIMEMultipart("alternative")
+msg["Subject"] = "📊 Monthly Insider Trading Report"
+msg["From"] = sender
+msg["To"] = sender
+
+msg.attach(MIMEText(html_content, "html"))
+
+server = smtplib.SMTP("smtp.gmail.com", 587)
+server.starttls()
 server.login(sender, password)
 server.sendmail(sender, sender, msg.as_string())
 server.quit()
 
-print("✅ Email Sent Successfully")
+print("✅ Email sent successfully")
