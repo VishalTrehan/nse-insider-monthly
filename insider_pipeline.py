@@ -10,7 +10,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
 # -------------------------------
-# NSE SESSION (CRITICAL FIX)
+# NSE SESSION SETUP
 # -------------------------------
 HEADERS = {
     "User-Agent": "Mozilla/5.0",
@@ -21,7 +21,7 @@ HEADERS = {
 session = requests.Session()
 session.headers.update(HEADERS)
 
-# Warm-up request (MANDATORY)
+# Warm-up request (important)
 session.get("https://www.nseindia.com", timeout=10)
 time.sleep(2)
 
@@ -45,16 +45,27 @@ resp = session.get(url, timeout=20)
 
 try:
     data = resp.json()
-except:
-    raise ValueError("NSE did not return JSON. Likely blocked or changed API.")
-
-df = pd.DataFrame(data)
-
-if df.empty:
-    raise ValueError("No data received from NSE")
+except Exception:
+    print("Raw response preview:")
+    print(resp.text[:500])
+    raise ValueError("NSE did not return JSON")
 
 # -------------------------------
-# STANDARDIZE (BASED ON YOUR COLAB LEARNINGS)
+# CORRECT DATA EXTRACTION
+# -------------------------------
+if not isinstance(data, dict) or "data" not in data:
+    print("Unexpected structure:", data)
+    raise ValueError("Unexpected NSE response structure")
+
+records = data.get("data", [])
+
+if not records:
+    raise ValueError("No data received from NSE")
+
+df = pd.DataFrame(records)
+
+# -------------------------------
+# CLEAN & STANDARDIZE
 # -------------------------------
 df.columns = df.columns.str.strip()
 
@@ -69,31 +80,28 @@ rename_map = {
 
 df = df.rename(columns=rename_map)
 
-required = ['symbol','person','mode','secVal','stake_change','date']
-df = df[[c for c in required if c in df.columns]]
+required_cols = ['symbol', 'person', 'mode', 'secVal', 'stake_change', 'date']
+df = df[[c for c in required_cols if c in df.columns]]
 
-# -------------------------------
-# CLEAN
-# -------------------------------
 df['date'] = pd.to_datetime(df['date'], errors='coerce')
 df = df.dropna(subset=['date'])
 
 df['person'] = df['person'].astype(str)
 
+# -------------------------------
+# FLAGS
+# -------------------------------
 df['is_promoter'] = df['person'].str.contains("promoter", case=False, na=False).astype(int)
-
 df['is_market'] = df['mode'].str.contains("market", case=False, na=False).astype(int)
 
-# -------------------------------
-# FILTER (IMPORTANT)
-# -------------------------------
+# Only market transactions
 df = df[df['is_market'] == 1]
 
 if df.empty:
-    raise ValueError("No market purchase transactions")
+    raise ValueError("No valid market transactions found")
 
 # -------------------------------
-# AGGREGATE
+# AGGREGATION
 # -------------------------------
 agg = df.groupby('symbol').agg({
     'secVal': 'sum',
@@ -117,54 +125,54 @@ agg['score_stake'] = normalize(agg['stake_change'])
 agg['score_promoter'] = (agg['promoter_txn'] > 0).astype(int)
 
 agg['final_score'] = (
-    0.4*agg['score_value'] +
-    0.2*agg['score_txn'] +
-    0.2*agg['score_stake'] +
-    0.2*agg['score_promoter']
+    0.4 * agg['score_value'] +
+    0.2 * agg['score_txn'] +
+    0.2 * agg['score_stake'] +
+    0.2 * agg['score_promoter']
 )
 
-top = agg.sort_values('final_score', ascending=False).head(10)
+top = agg.sort_values('final_score', ascending=False).head(10).copy()
 
 # -------------------------------
-# ANALYSIS (CLEAN STYLE)
+# TEXT ANALYSIS (CLEAN STYLE)
 # -------------------------------
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
 prompt = f"""
-Write a professional investor note.
+Write a professional investor summary.
 
 No emojis. No markdown. No mention of AI.
 
 Sections:
-Key Observations
-Concerns
-Top Opportunities (3 stocks with reasoning)
-Conclusion
+1. Key Observations
+2. Risks or Concerns
+3. Top Opportunities (3 stocks with reasoning)
+4. Conclusion
 
-DATA:
+Data:
 {top.to_string(index=False)}
 """
 
 response = client.chat.completions.create(
     model="gpt-4o-mini",
-    messages=[{"role":"user","content":prompt}]
+    messages=[{"role": "user", "content": prompt}]
 )
 
 analysis = response.choices[0].message.content
 
 # -------------------------------
-# EMAIL FORMAT (CLEAN LIKE YOUR OTHER BOT)
+# EMAIL FORMAT
 # -------------------------------
-top['Rank'] = range(1, len(top)+1)
+top['Rank'] = range(1, len(top) + 1)
 
 table_html = top[['Rank','symbol','secVal','stake_change','txn_count','promoter_txn','final_score']].to_html(index=False)
 
 html = f"""
 <html>
-<body style="font-family:Arial;background:#f4f6fb;padding:20px;">
-<div style="max-width:900px;margin:auto;background:#fff;border-radius:10px;">
+<body style="font-family:Arial;background:#f5f7fb;padding:20px;">
+<div style="max-width:900px;margin:auto;background:#ffffff;border-radius:8px;">
 
-<div style="background:#0b3d91;color:white;padding:20px;border-radius:10px 10px 0 0;">
+<div style="background:#1a2b4c;color:white;padding:15px;border-radius:8px 8px 0 0;">
 <h2>NSE Insider Trading Report</h2>
 <p>{from_date} to {to_date}</p>
 </div>
@@ -173,7 +181,7 @@ html = f"""
 <h3>Top Insider Activity</h3>
 {table_html}
 
-<h3>Insights</h3>
+<h3>Summary</h3>
 <p>{analysis.replace(chr(10), "<br>")}</p>
 </div>
 
@@ -183,10 +191,13 @@ html = f"""
 """
 
 # -------------------------------
-# SEND EMAIL
+# EMAIL SEND
 # -------------------------------
 sender = os.environ.get("EMAIL")
 password = os.environ.get("GMAIL_APP_PASSWORD")
+
+if not sender or not password:
+    raise ValueError("Email credentials missing in secrets")
 
 msg = MIMEMultipart()
 msg["Subject"] = "NSE Insider Monthly Report"
