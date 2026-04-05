@@ -10,7 +10,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
 # -------------------------------
-# NSE SESSION SETUP
+# NSE SESSION
 # -------------------------------
 HEADERS = {
     "User-Agent": "Mozilla/5.0",
@@ -21,12 +21,11 @@ HEADERS = {
 session = requests.Session()
 session.headers.update(HEADERS)
 
-# Warm-up request (important)
 session.get("https://www.nseindia.com", timeout=10)
 time.sleep(2)
 
 # -------------------------------
-# DATE RANGE (LAST MONTH)
+# DATE RANGE
 # -------------------------------
 today = datetime.today()
 first_day = today.replace(day=1)
@@ -45,60 +44,67 @@ resp = session.get(url, timeout=20)
 
 try:
     data = resp.json()
-except Exception:
-    print("Raw response preview:")
+except:
     print(resp.text[:500])
-    raise ValueError("NSE did not return JSON")
+    raise ValueError("Invalid JSON from NSE")
 
-# -------------------------------
-# CORRECT DATA EXTRACTION
-# -------------------------------
-if not isinstance(data, dict) or "data" not in data:
-    print("Unexpected structure:", data)
-    raise ValueError("Unexpected NSE response structure")
+if "data" not in data:
+    raise ValueError(f"Unexpected response: {data}")
 
-records = data.get("data", [])
+records = data["data"]
 
 if not records:
-    raise ValueError("No data received from NSE")
+    raise ValueError("No data received")
 
 df = pd.DataFrame(records)
-
-# -------------------------------
-# CLEAN & STANDARDIZE
-# -------------------------------
 df.columns = df.columns.str.strip()
 
-rename_map = {
-    'symbol': 'symbol',
-    'acqName': 'person',
-    'modeOfAcquisition': 'mode',
-    'secVal': 'secVal',
-    'secAcq': 'stake_change',
-    'acqtoDt': 'date'
-}
+# -------------------------------
+# 🔥 AUTO DETECT DATE COLUMN
+# -------------------------------
+possible_dates = ['acqtoDt', 'acqFromDt', 'intimDt', 'broadcastDt']
 
-df = df.rename(columns=rename_map)
+date_col = None
+for col in possible_dates:
+    if col in df.columns:
+        date_col = col
+        break
 
-required_cols = ['symbol', 'person', 'mode', 'secVal', 'stake_change', 'date']
-df = df[[c for c in required_cols if c in df.columns]]
+if date_col is None:
+    raise ValueError(f"No date column found. Columns available: {list(df.columns)}")
 
-df['date'] = pd.to_datetime(df['date'], errors='coerce')
+df['date'] = pd.to_datetime(df[date_col], errors='coerce')
 df = df.dropna(subset=['date'])
 
-df['person'] = df['person'].astype(str)
+# -------------------------------
+# STANDARDIZE COLUMNS SAFELY
+# -------------------------------
+def safe_col(name_list):
+    for col in name_list:
+        if col in df.columns:
+            return df[col]
+    return None
+
+df['symbol'] = safe_col(['symbol'])
+df['person'] = safe_col(['acqName', 'person'])
+df['mode'] = safe_col(['modeOfAcquisition'])
+df['secVal'] = pd.to_numeric(safe_col(['secVal']), errors='coerce')
+df['stake_change'] = pd.to_numeric(safe_col(['secAcq']), errors='coerce')
+
+df = df.dropna(subset=['symbol', 'mode'])
 
 # -------------------------------
 # FLAGS
 # -------------------------------
+df['person'] = df['person'].astype(str)
+
 df['is_promoter'] = df['person'].str.contains("promoter", case=False, na=False).astype(int)
 df['is_market'] = df['mode'].str.contains("market", case=False, na=False).astype(int)
 
-# Only market transactions
 df = df[df['is_market'] == 1]
 
 if df.empty:
-    raise ValueError("No valid market transactions found")
+    raise ValueError("No market transactions")
 
 # -------------------------------
 # AGGREGATION
@@ -119,35 +125,30 @@ agg = df.groupby('symbol').agg({
 def normalize(x):
     return (x - x.min()) / (x.max() - x.min() + 1e-9)
 
-agg['score_value'] = normalize(agg['secVal'])
-agg['score_txn'] = normalize(agg['txn_count'])
-agg['score_stake'] = normalize(agg['stake_change'])
-agg['score_promoter'] = (agg['promoter_txn'] > 0).astype(int)
-
 agg['final_score'] = (
-    0.4 * agg['score_value'] +
-    0.2 * agg['score_txn'] +
-    0.2 * agg['score_stake'] +
-    0.2 * agg['score_promoter']
+    0.4 * normalize(agg['secVal']) +
+    0.2 * normalize(agg['txn_count']) +
+    0.2 * normalize(agg['stake_change']) +
+    0.2 * (agg['promoter_txn'] > 0).astype(int)
 )
 
-top = agg.sort_values('final_score', ascending=False).head(10).copy()
+top = agg.sort_values('final_score', ascending=False).head(10)
 
 # -------------------------------
-# TEXT ANALYSIS (CLEAN STYLE)
+# ANALYSIS
 # -------------------------------
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
 prompt = f"""
-Write a professional investor summary.
+Write a professional investor report.
 
 No emojis. No markdown. No mention of AI.
 
 Sections:
-1. Key Observations
-2. Risks or Concerns
-3. Top Opportunities (3 stocks with reasoning)
-4. Conclusion
+- Key Observations
+- Risks
+- Top 3 Opportunities
+- Conclusion
 
 Data:
 {top.to_string(index=False)}
@@ -161,46 +162,36 @@ response = client.chat.completions.create(
 analysis = response.choices[0].message.content
 
 # -------------------------------
-# EMAIL FORMAT
+# EMAIL
 # -------------------------------
 top['Rank'] = range(1, len(top) + 1)
 
-table_html = top[['Rank','symbol','secVal','stake_change','txn_count','promoter_txn','final_score']].to_html(index=False)
+table_html = top.to_html(index=False)
 
 html = f"""
 <html>
 <body style="font-family:Arial;background:#f5f7fb;padding:20px;">
-<div style="max-width:900px;margin:auto;background:#ffffff;border-radius:8px;">
-
-<div style="background:#1a2b4c;color:white;padding:15px;border-radius:8px 8px 0 0;">
+<div style="max-width:900px;margin:auto;background:#fff;border-radius:8px;">
+<div style="background:#1a2b4c;color:white;padding:15px;">
 <h2>NSE Insider Trading Report</h2>
 <p>{from_date} to {to_date}</p>
 </div>
 
 <div style="padding:20px;">
-<h3>Top Insider Activity</h3>
 {table_html}
-
-<h3>Summary</h3>
-<p>{analysis.replace(chr(10), "<br>")}</p>
+<br><br>
+{analysis.replace(chr(10), "<br>")}
 </div>
-
 </div>
 </body>
 </html>
 """
 
-# -------------------------------
-# EMAIL SEND
-# -------------------------------
 sender = os.environ.get("EMAIL")
 password = os.environ.get("GMAIL_APP_PASSWORD")
 
-if not sender or not password:
-    raise ValueError("Email credentials missing in secrets")
-
 msg = MIMEMultipart()
-msg["Subject"] = "NSE Insider Monthly Report"
+msg["Subject"] = "NSE Insider Report"
 msg["From"] = sender
 msg["To"] = sender
 
@@ -211,4 +202,4 @@ server.login(sender, password)
 server.sendmail(sender, sender, msg.as_string())
 server.quit()
 
-print("Report sent successfully")
+print("Success")
