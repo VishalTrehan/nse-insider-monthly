@@ -41,18 +41,9 @@ to_date = last_month_end.strftime("%d-%m-%Y")
 url = f"https://www.nseindia.com/api/corporate-sast-reg29?from_date={from_date}&to_date={to_date}"
 
 resp = session.get(url, timeout=20)
+data = resp.json()
 
-try:
-    data = resp.json()
-except:
-    print(resp.text[:500])
-    raise ValueError("Invalid JSON from NSE")
-
-if "data" not in data:
-    raise ValueError(f"Unexpected response: {data}")
-
-records = data["data"]
-
+records = data.get("data", [])
 if not records:
     raise ValueError("No data received")
 
@@ -60,58 +51,38 @@ df = pd.DataFrame(records)
 df.columns = df.columns.str.strip()
 
 # -------------------------------
-# 🔥 AUTO DETECT DATE COLUMN
+# USE ACTUAL COLUMNS
 # -------------------------------
-possible_dates = ['acqtoDt', 'acqFromDt', 'intimDt', 'broadcastDt']
-
-date_col = None
-for col in possible_dates:
-    if col in df.columns:
-        date_col = col
-        break
-
-if date_col is None:
-    raise ValueError(f"No date column found. Columns available: {list(df.columns)}")
-
-df['date'] = pd.to_datetime(df[date_col], errors='coerce')
+df['date'] = pd.to_datetime(df['acquirerDate'], errors='coerce')
 df = df.dropna(subset=['date'])
 
-# -------------------------------
-# STANDARDIZE COLUMNS SAFELY
-# -------------------------------
-def safe_col(name_list):
-    for col in name_list:
-        if col in df.columns:
-            return df[col]
-    return None
+df['symbol'] = df['symbol']
+df['person'] = df['acquirerName']
+df['mode'] = df['acquisitionMode']
 
-df['symbol'] = safe_col(['symbol'])
-df['person'] = safe_col(['acqName', 'person'])
-df['mode'] = safe_col(['modeOfAcquisition'])
-df['secVal'] = pd.to_numeric(safe_col(['secVal']), errors='coerce')
-df['stake_change'] = pd.to_numeric(safe_col(['secAcq']), errors='coerce')
+# numeric fields
+df['buy_qty'] = pd.to_numeric(df['totAcqShare'], errors='coerce').fillna(0)
+df['sell_qty'] = pd.to_numeric(df['totSaleShare'], errors='coerce').fillna(0)
 
-df = df.dropna(subset=['symbol', 'mode'])
+# promoter flag
+df['is_promoter'] = df['promoterType'].str.contains("promoter", case=False, na=False).astype(int)
+
+# buy/sell direction
+df['is_buy'] = df['acqSaleType'].str.contains("buy", case=False, na=False).astype(int)
 
 # -------------------------------
-# FLAGS
+# FILTER ONLY MARKET BUYS
 # -------------------------------
-df['person'] = df['person'].astype(str)
-
-df['is_promoter'] = df['person'].str.contains("promoter", case=False, na=False).astype(int)
-df['is_market'] = df['mode'].str.contains("market", case=False, na=False).astype(int)
-
-df = df[df['is_market'] == 1]
+df = df[(df['is_buy'] == 1) & (df['buy_qty'] > 0)]
 
 if df.empty:
-    raise ValueError("No market transactions")
+    raise ValueError("No valid buy transactions")
 
 # -------------------------------
 # AGGREGATION
 # -------------------------------
 agg = df.groupby('symbol').agg({
-    'secVal': 'sum',
-    'stake_change': 'sum',
+    'buy_qty': 'sum',
     'symbol': 'count',
     'is_promoter': 'sum'
 }).rename(columns={
@@ -126,9 +97,8 @@ def normalize(x):
     return (x - x.min()) / (x.max() - x.min() + 1e-9)
 
 agg['final_score'] = (
-    0.4 * normalize(agg['secVal']) +
-    0.2 * normalize(agg['txn_count']) +
-    0.2 * normalize(agg['stake_change']) +
+    0.5 * normalize(agg['buy_qty']) +
+    0.3 * normalize(agg['txn_count']) +
     0.2 * (agg['promoter_txn'] > 0).astype(int)
 )
 
@@ -145,10 +115,10 @@ Write a professional investor report.
 No emojis. No markdown. No mention of AI.
 
 Sections:
-- Key Observations
-- Risks
-- Top 3 Opportunities
-- Conclusion
+Key Observations
+Risks
+Top 3 Opportunities
+Conclusion
 
 Data:
 {top.to_string(index=False)}
@@ -164,24 +134,21 @@ analysis = response.choices[0].message.content
 # -------------------------------
 # EMAIL
 # -------------------------------
-top['Rank'] = range(1, len(top) + 1)
+top['Rank'] = range(1, len(top)+1)
 
-table_html = top.to_html(index=False)
+html_table = top.to_html(index=False)
 
 html = f"""
 <html>
 <body style="font-family:Arial;background:#f5f7fb;padding:20px;">
-<div style="max-width:900px;margin:auto;background:#fff;border-radius:8px;">
-<div style="background:#1a2b4c;color:white;padding:15px;">
+<div style="max-width:900px;margin:auto;background:#fff;">
 <h2>NSE Insider Trading Report</h2>
 <p>{from_date} to {to_date}</p>
-</div>
 
-<div style="padding:20px;">
-{table_html}
+{html_table}
+
 <br><br>
 {analysis.replace(chr(10), "<br>")}
-</div>
 </div>
 </body>
 </html>
